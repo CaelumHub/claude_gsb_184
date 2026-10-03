@@ -19,6 +19,10 @@ from . import profiler as profiler_mod
 from . import storage
 from . import memory_model
 from . import diagnostics as diag
+from . import dataflow as df_mod
+from . import lexer as lexer_mod
+from . import parser as parser_mod
+from . import semantic as semantic_mod
 
 
 _RESULTS = []
@@ -45,6 +49,7 @@ def run_all():
     _test_lexer()
     _test_parser()
     _test_semantic()
+    _test_dataflow()
     _test_vm_basic()
     _test_functions_recursion()
     _test_control_flow()
@@ -98,6 +103,100 @@ def _test_semantic():
     ok2 = any("2 个参数" in e.message or "需要 2" in e.message for e in errs2)
     _check("语义分析：参数个数不匹配报错", ok2,
            str([e.message for e in errs2]) if not ok2 else "")
+
+
+def _dataflow(src):
+    toks, _ = lexer_mod.tokenize(src)
+    prog = parser_mod.Parser(toks).parse()
+    an = semantic_mod.SemanticAnalyzer()
+    an.set_source(src)
+    an.analyze(prog)
+    return df_mod.analyze(prog, an.symbols, toks)
+
+
+def _test_dataflow():
+    # 1) 顺序多次赋值：后一个使用只看到最近一次再定义
+    res = _dataflow("var x = 1;\nx = 2;\nprint(x);\n")
+    u = next(u for u in res["uses"] if u["context"] != "callee")
+    ok = u["reaching"] and all(
+        (d["kind"], d["line"]) == ("reassign", 2) for d in
+        [next(x for x in res["defs"] if x["id"] == i) for i in u["reaching"]])
+    _check("数据流：多次赋值使用点指向最近再定义", ok, str(u["reaching"]))
+
+    # 2) 分支汇合：if/else 两条路径的定义都到达汇合点
+    src = ("var x = 1;\n"
+           "if (x > 0) { x = 3; } else { x = 4; }\n"
+           "print(x);\n")
+    res = _dataflow(src)
+    u = next(u for u in res["uses"] if u["name"] == "x" and u["line"] == 3)
+    dmap = {d["id"]: d for d in res["defs"]}
+    cols = sorted(dmap[i]["column"] for i in u["reaching"])
+    kinds = sorted(dmap[i]["kind"] for i in u["reaching"])
+    _check("数据流：if/else 分支汇合到达两个再赋值定义",
+           kinds == ["reassign", "reassign"] and cols == [14, 30],
+           f"{kinds} {cols}")
+
+    # 3) 循环再赋值：循环体内使用同时到达循环前定义与循环体上一轮再定义
+    src = ("var s = 0;\n"
+           "while (s < 3) { s = s + 1; }\n"
+           "print(s);\n")
+    res = _dataflow(src)
+    dmap = {d["id"]: d for d in res["defs"]}
+    rhs = next(u for u in res["uses"] if u["name"] == "s" and u["line"] == 2 and u["column"] == 21)
+    labels = sorted(dmap[i]["kind"] + "@L" + str(dmap[i]["line"]) for i in rhs["reaching"])
+    _check("数据流：循环体使用到达循环前定义与上一轮再定义",
+           labels == ["decl@L1", "reassign@L2"], str(labels))
+    # 循环条件首次执行只看到循环前定义，但经回边也看到上一轮再定义
+    cond = next(u for u in res["uses"] if u["name"] == "s" and u["line"] == 2 and u["column"] == 8)
+    labels = sorted(dmap[i]["kind"] for i in cond["reaching"])
+    _check("数据流：循环条件经回边到达再定义", labels == ["decl", "reassign"], str(labels))
+
+    # 4) 作用域遮蔽：内层同名符号的使用只到内层定义，外层使用到外层定义
+    src = ("var x = 1;\n"
+           "func f() {\n"
+           "    if (true) { var x = 9; print(x); }\n"
+           "    print(x);\n"
+           "}\n"
+           "print(x);\n"
+           "f();\n")
+    res = _dataflow(src)
+    dmap = {d["id"]: d for d in res["defs"]}
+    inner = next(u for u in res["uses"] if u["region"] == "f" and u["line"] == 3)
+    outer_in_f = next(u for u in res["uses"] if u["region"] == "f" and u["line"] == 4)
+    global_use = next(u for u in res["uses"] if u["region"] == "<global>" and u["line"] == 6)
+    reach_of = lambda u: [(dmap[i]["kind"], dmap[i]["line"]) for i in u["reaching"]]
+    ok = (reach_of(inner) == [("decl", 3)]
+          and reach_of(outer_in_f) == [("decl", 1)]
+          and reach_of(global_use) == [("decl", 1)])
+    _check("数据流：作用域遮蔽不跨符号串线", ok,
+           f"{reach_of(inner)} {reach_of(outer_in_f)} {reach_of(global_use)}")
+
+    # 5) 形参：函数体内形参使用指向形参定义
+    res = _dataflow("func add(a, b) { return a + b; }\nprint(add(1, 2));\n")
+    pa = next(u for u in res["uses"] if u["region"] == "add" and u["name"] == "a")
+    pb = next(u for u in res["uses"] if u["region"] == "add" and u["name"] == "b")
+    dmap = {d["id"]: d for d in res["defs"]}
+    ok = (len(pa["reaching"]) == 1 and dmap[pa["reaching"][0]]["kind"] == "param"
+          and len(pb["reaching"]) == 1 and dmap[pb["reaching"][0]]["kind"] == "param")
+    _check("数据流：形参使用点指向形参定义", ok)
+
+    # 6) 未解析名字不臆造定义；未初始化声明单独标记
+    res = _dataflow("print(missing);\nvar y;\nprint(y);\n")
+    miss = next(u for u in res["uses"] if u["name"] == "missing")
+    y = next(u for u in res["uses"] if u["name"] == "y")
+    dmap = {d["id"]: d for d in res["defs"]}
+    ok = (miss["unresolved"] and miss["reaching"] == []
+          and len(y["reaching"]) == 1 and dmap[y["reaching"][0]]["kind"] == "uninit")
+    _check("数据流：未解析名字无定义、未初始化声明显式标记", ok)
+
+    # 7) for 循环增量：条件处 i 到达初值定义与增量再定义（回边）
+    src = "for (var i = 0; i < 3; i = i + 1) { print(i); }\n"
+    res = _dataflow(src)
+    cond_i = next(u for u in res["uses"] if u["line"] == 1 and u["column"] == 17)
+    dmap = {d["id"]: d for d in res["defs"]}
+    kinds = sorted(dmap[i]["kind"] for i in cond_i["reaching"])
+    _check("数据流：for 条件到达初值声明与增量再定义", kinds == ["decl", "reassign"],
+           str(kinds))
 
 
 def _test_vm_basic():

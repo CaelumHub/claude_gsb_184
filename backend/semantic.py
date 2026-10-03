@@ -84,6 +84,18 @@ class SemanticAnalyzer:
         for decl in program.declarations:
             if isinstance(decl, ast.FunctionDecl):
                 self._declare_function(decl)
+        # 顶层 var 也预登记进全局作用域：函数体内引用后定义的全局变量时
+        # （函数往往在调用前才执行），名字解析与全局归属才能正确。
+        for decl in program.declarations:
+            if isinstance(decl, ast.VarDecl):
+                if self.symbols.global_scope.lookup_local(decl.name) is None:
+                    s = sym.Symbol(decl.name, sym.KIND_VARIABLE,
+                                   self.symbols.global_scope,
+                                   line=decl.line, column=decl.column,
+                                   symbol_type=sym.TYPE_UNKNOWN)
+                    s.predeclared = True
+                    self.symbols.global_scope.define(s)
+                    decl._predecl_symbol = s
         # 第二遍：分析每个声明
         for decl in program.declarations:
             if isinstance(decl, ast.FunctionDecl):
@@ -146,7 +158,12 @@ class SemanticAnalyzer:
         elif isinstance(stmt, ast.AssignStmt):
             self._assign(stmt)
         elif isinstance(stmt, ast.ExprStmt):
-            self._expr(stmt.expr)
+            # 解析器把顶层赋值（含 for 增量 i = i + 1）包成 ExprStmt(AssignStmt)，
+            # 这里拆出来走赋值分析，保证左值符号绑定、未定义/常量赋值检查不被跳过。
+            if isinstance(stmt.expr, ast.AssignStmt):
+                self._assign(stmt.expr)
+            else:
+                self._expr(stmt.expr)
         elif isinstance(stmt, ast.PrintStmt):
             for a in stmt.args:
                 self._expr(a)
@@ -167,7 +184,10 @@ class SemanticAnalyzer:
             if stmt.condition:
                 self._expr(stmt.condition)
             if stmt.increment:
-                self._expr(stmt.increment)
+                if isinstance(stmt.increment, ast.AssignStmt):
+                    self._assign(stmt.increment)
+                else:
+                    self._expr(stmt.increment)
             self.loop_depth += 1
             self._analyze_block(stmt.body)
             self.loop_depth -= 1
@@ -183,26 +203,39 @@ class SemanticAnalyzer:
                     source_line=self._line(stmt))
         elif isinstance(stmt, ast.FunctionDecl):
             self._analyze_function(stmt)
-
     def _var_decl(self, decl: ast.VarDecl):
+        predecl = getattr(decl, "_predecl_symbol", None)
         if self.current_scope.lookup_local(decl.name):
             prev = self.current_scope.lookup_local(decl.name)
-            self.diagnostics.add(semantic_redeclared(
-                decl.name, prev.line, decl.line, decl.column, self._line(decl)))
-            return
+            # 顶层 var 在 analyze 入口已预登记进全局作用域，这里是它的真正声明
+            if not (predecl is not None and prev is predecl):
+                self.diagnostics.add(semantic_redeclared(
+                    decl.name, prev.line, decl.line, decl.column, self._line(decl)))
+                return
         if decl.initializer:
             decl.expr_type = self._expr(decl.initializer)
         else:
             decl.expr_type = sym.TYPE_NULL
-        # 检查是否遮蔽外层
-        outer = self.current_scope.parent.lookup(decl.name) if self.current_scope.parent else decl
+        # 检查是否遮蔽外层（仅外层作用域里已存在同名才算遮蔽，同作用域是重复声明）
+        outer = None
+        parent_scope = self.current_scope.parent
+        if parent_scope is not None:
+            outer = parent_scope.lookup(decl.name)
         if outer:
             self.diagnostics.add(warning_shadowing(
                 decl.name, outer.line, decl.line, decl.column, self._line(decl)))
-        s = sym.Symbol(decl.name, sym.KIND_VARIABLE, self.current_scope,
-                       line=decl.line, column=decl.column, symbol_type=decl.expr_type,
-                       is_const=decl.is_const)
-        self.current_scope.define(s)
+        if predecl is not None:
+            # 复用预登记符号，补全类型/位置信息
+            predecl.line = decl.line
+            predecl.column = decl.column
+            predecl.symbol_type = decl.expr_type
+            predecl.is_const = decl.is_const
+            s = predecl
+        else:
+            s = sym.Symbol(decl.name, sym.KIND_VARIABLE, self.current_scope,
+                           line=decl.line, column=decl.column, symbol_type=decl.expr_type,
+                           is_const=decl.is_const)
+            self.current_scope.define(s)
         decl.symbol = s
 
     def _assign(self, stmt: ast.AssignStmt):

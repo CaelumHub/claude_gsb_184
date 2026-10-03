@@ -16,6 +16,7 @@
     { key: "editor",      href: "editor.html",      icon: "✏️", title: "代码编辑器",      group: "开发" },
     { key: "ast",         href: "ast.html",         icon: "🌳", title: "AST 语法树可视化", group: "编译前端" },
     { key: "symbols",     href: "symbols.html",     icon: "🏷️", title: "符号表与作用域",  group: "编译前端" },
+    { key: "dataflow",    href: "dataflow.html",    icon: "🔀", title: "数据流分析",      group: "编译前端" },
     { key: "bytecode",    href: "bytecode.html",    icon: "🧩", title: "字节码 / 中间代码", group: "编译前端" },
     { key: "debug",       href: "debug.html",       icon: "🐞", title: "执行跟踪与单步调试", group: "运行调试" },
     { key: "callstack",   href: "callstack.html",   icon: "📚", title: "调用栈与变量监视", group: "运行调试" },
@@ -141,6 +142,7 @@
 
     // ---- 编译 / 运行 ----
     compile(source, detail) { return this.post("/api/compile", { source, detail: detail || "all" }); },
+    dataflow(source) { return this.post("/api/dataflow", { source }); },
     run(source, options) { return this.post("/api/run", { source, options: options || {} }); },
 
     // ---- 调试 ----

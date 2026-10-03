@@ -407,6 +407,80 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .diff-line.del { background: var(--danger-soft); color: var(--danger); }
 .diff-line .mark { margin-right: 8px; font-weight: 700; }
 
+/* ---------- 数据流分析 ---------- */
+.df-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .df-layout { grid-template-columns: 1fr; } }
+
+.df-src-wrap {
+  position: relative; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); overflow: auto; max-height: 640px;
+}
+.df-src-inner { position: relative; padding: 6px 0; }
+.df-lane { position: absolute; top: 0; bottom: 0; width: 22px; z-index: 1; pointer-events: none; }
+.df-src {
+  font-family: var(--mono); font-size: 13px; line-height: 20px; white-space: pre;
+  position: relative; z-index: 2;
+}
+.df-src .df-line { display: block; padding: 0 14px 0 66px; position: relative; min-height: 20px; }
+.df-src .df-line .df-lno {
+  position: absolute; left: 0; width: 52px; text-align: right; padding-right: 10px;
+  color: var(--text-faint); user-select: none;
+}
+.df-mark {
+  border-radius: 3px; cursor: pointer; padding: 0 1px; position: relative;
+  transition: background .12s, box-shadow .12s, opacity .12s;
+}
+.df-mark.df-def { box-shadow: inset 0 -2px 0 var(--success); background: var(--success-soft); }
+.df-mark.df-use { border-bottom: 2px dotted var(--accent); background: var(--accent-soft); }
+.df-mark.df-unresolved { background: var(--danger-soft); box-shadow: inset 0 -2px 0 var(--danger); }
+.df-mark.df-glyph { padding: 0; }
+.df-mark .df-glyph {
+  font-size: 9px; font-family: var(--sans); font-weight: 800; margin-left: 1px;
+  vertical-align: 1px; line-height: 1;
+}
+.df-mark.df-def .df-glyph { color: var(--success); }
+.df-mark.df-use .df-glyph { color: var(--accent); }
+.df-mark.df-unresolved .df-glyph { color: var(--danger); }
+.df-mark.dim { opacity: .22; }
+.df-mark.sel { box-shadow: 0 0 0 2px var(--primary), inset 0 -2px 0 currentColor; }
+.df-mark.df-def.sel { color: var(--success); }
+.df-mark.df-use.sel { color: var(--accent); }
+.df-arcs { position: absolute; top: 0; left: 0; z-index: 3; pointer-events: none; }
+.df-arcs path { fill: none; stroke-width: 1.4; opacity: .55; }
+.df-arcs path.dim { opacity: .06; }
+.df-arcs path.fwd { stroke: var(--accent); }
+.df-arcs path.back { stroke: var(--warning); }
+.df-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-muted); }
+.df-legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+
+.df-side { position: sticky; top: 70px; display: flex; flex-direction: column; gap: 12px; }
+.df-stat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.df-stat .stat-tile { padding: 10px 6px; }
+.df-stat .stat-tile .v { font-size: 18px; }
+.df-filter { width: 100%; }
+.df-list-panel { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.df-chain { border-bottom: 1px solid var(--border); padding: 8px 10px; font-size: 12.5px; }
+.df-chain:last-child { border-bottom: none; }
+.df-chain:hover { background: var(--surface-2); }
+.df-chain .chain-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; cursor: pointer; }
+.df-chain .chain-head .nm { font-family: var(--mono); font-weight: 700; }
+.df-chain .chain-arrow { color: var(--text-faint); }
+.df-chain .reaching { margin: 5px 0 0 18px; display: flex; flex-direction: column; gap: 3px; }
+.df-chain .reaching .r { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.df-loc { color: var(--text-faint); font-size: 11px; font-family: var(--mono); cursor: pointer; }
+.df-loc:hover { color: var(--primary); }
+.df-tabs { display: flex; gap: 4px; }
+.df-tabs button { padding: 4px 12px; font-size: 12px; border-radius: 20px; border: 1px solid var(--border-strong);
+  background: var(--surface); cursor: pointer; }
+.df-tabs button.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.df-varchips { display: flex; flex-wrap: wrap; gap: 5px; max-height: 118px; overflow: auto; }
+.df-varchips .chip {
+  font-family: var(--mono); font-size: 11.5px; padding: 2px 9px; border-radius: 20px;
+  border: 1px solid var(--border-strong); background: var(--surface); cursor: pointer;
+}
+.df-varchips .chip.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); font-weight: 700; }
+.df-note { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+
 /* ---------- 杂项 ---------- */
 .flex { display: flex; gap: 10px; align-items: center; }
 .flex.wrap { flex-wrap: wrap; }

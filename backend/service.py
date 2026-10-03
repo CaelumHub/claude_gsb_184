@@ -249,6 +249,28 @@ class Service:
             view["bytecode"]["functions"].reverse()
         return view
 
+    def dataflow_view(self, source):
+        """到达-定义 / 使用-定义链分析（复用语义分析的符号解析结果）。
+
+        直接复用编译流水线产出的带符号绑定 AST、符号表与 token 流；
+        词法/语法失败（无 AST）时返回 available=False。
+        """
+        from . import dataflow as dataflow_mod
+
+        result = compiler_mod.compile_source(source)
+        out = {
+            "available": False,
+            "diagnostics": result.diagnostics.to_list(),
+            "success": result.success,
+            "stage": result.stage,
+        }
+        if result.ast is None or result.symbol_table is None or result.analyzer is None:
+            return out
+        view = dataflow_mod.analyze(result.ast, result.symbol_table, result.tokens)
+        out.update(view)
+        out["diagnostics"] = result.diagnostics.to_list()
+        return out
+
     # ==================================================================
     # 运行（普通 / 性能剖析）
     # ==================================================================

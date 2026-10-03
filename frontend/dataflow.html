@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据流分析 · MiniLang 平台</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <header class="topbar" id="topbar"></header>
+    <div class="content">
+      <div class="flex wrap between mb">
+        <div class="flex wrap" style="gap:8px">
+          <select id="sample"></select>
+          <button class="btn sm" id="btn-loadproj">📂 载入项目源码</button>
+        </div>
+        <button class="btn primary" id="btn-build">🔀 分析数据流</button>
+      </div>
+
+      <div id="editor"></div>
+
+      <div class="card mt" id="result-card" style="display:none">
+        <div class="flex between wrap" style="gap:10px">
+          <h2 style="margin-bottom:0">使用-定义链（Use-Def Chain）</h2>
+          <div class="df-legend">
+            <span><span class="sw" style="background:var(--success-soft);box-shadow:inset 0 -2px 0 var(--success)"></span>定义点</span>
+            <span><span class="sw" style="background:var(--accent-soft);box-shadow:inset 0 -2px 0 var(--accent)"></span>使用点</span>
+            <span><svg width="22" height="8"><path d="M0 6 C 8 -4, 14 -4, 22 2" fill="none" stroke="var(--accent)" stroke-width="1.5"/></svg>前向</span>
+            <span><svg width="22" height="8"><path d="M0 2 C 8 12, 14 12, 22 6" fill="none" stroke="var(--warning)" stroke-width="1.5"/></svg>循环回边</span>
+          </div>
+        </div>
+        <div class="desc">
+          每个使用点（读）都解析到真正可能为它供值的定义点（var 声明 / 形参 / 赋值再定义 / 函数 / 内置）。
+          分支汇合处可能同时到达多个定义；循环体里的读会同时到达"循环前的定义"与"上一轮的再定义"（橙色回边）。
+          点击源码中的标记或右侧条目可按变量过滤；内置函数定义在 L0。
+        </div>
+
+        <div class="df-stat mt" id="stats"></div>
+
+        <div class="flex wrap between mt mb" style="gap:8px">
+          <label class="flex" style="gap:6px;font-size:12px;color:var(--text-muted)">
+            变量
+            <input type="text" id="filter-name" placeholder="按名字过滤…" style="width:130px">
+          </label>
+          <div class="df-tabs" id="view-tabs">
+            <button data-v="chain" class="active">使用 → 定义</button>
+            <button data-v="def">定义 → 使用</button>
+          </div>
+        </div>
+        <div class="df-varchips mb" id="var-chips"></div>
+
+        <div class="df-layout">
+          <div class="df-src-wrap" id="src-wrap">
+            <div class="df-src-inner" id="src-inner">
+              <svg class="df-arcs" id="arcs"></svg>
+              <div class="df-src" id="df-src"></div>
+            </div>
+          </div>
+          <div class="df-side">
+            <div class="df-list-panel" id="chain-list"></div>
+            <div class="df-note" id="df-note"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="js/common.js"></script>
+<script src="js/editor.js"></script>
+<script>
+(function () {
+  ML.Shell.render("dataflow");
+  ML.Shell.setTitle("数据流分析");
+
+  const editor = new ML.CodeEditor(document.getElementById("editor"), {
+    value: ML.store.get("draft_source", ML.DEFAULT_CODE), height: 230,
+    onValueChange: (v) => ML.store.set("draft_source", v),
+  });
+  const sampleSel = document.getElementById("sample");
+  sampleSel.innerHTML = '<option value="">— 载入示例 —</option>' +
+    ML.SAMPLES.map((s, i) => `<option value="${i}">${ML.escapeHtml(s.name)}</option>`).join("");
+  sampleSel.onchange = () => {
+    if (sampleSel.value === "") return;
+    editor.setValue(ML.SAMPLES[+sampleSel.value].code);
+    sampleSel.value = "";
+  };
+  document.getElementById("btn-loadproj").onclick = async () =>
+    editor.setValue(await ML.Shell.loadSource(ML.DEFAULT_CODE));
+
+  const esc = ML.escapeHtml;
+  const DEF_LABEL = {
+    decl: ["初值声明", "green"], uninit: ["未初始化声明", "amber"],
+    param: ["形参", "cyan"], reassign: ["再赋值", "blue"],
+    function: ["函数定义", "purple"], builtin: ["内置函数", "gray"],
+  };
+  const USE_LABEL = {
+    read: ["取值", "cyan"], update: ["复合赋值读", "amber"],
+    callee: ["调用", "purple"], write: ["写入未声明", "red"],
+  };
+  const LINE_H = 20;
+
+  let DATA = null;
+  let selectedSym = null;   // symbol_id 或 "?"（未解析）
+  let viewMode = "chain";
+
+  /* ---------------- 源码标记渲染 ---------------- */
+  function buildMarkers(source, defs, uses) {
+    // 每行收集区间 [{start,end,kind,id,unresolved,glyph}]，列号 1-based -> 偏移
+    const lines = source.split("\n");
+    const byLine = lines.map(() => []);
+    for (const d of defs) {
+      if (d.line < 1) continue; // builtin L0 不画在源码里
+      const c0 = d.column - 1;
+      byLine[d.line - 1].push({ start: c0, end: c0 + d.length, kind: "def", id: d.id,
+        glyph: d.kind === "reassign" ? "=" : "D" });
+    }
+    for (const u of uses) {
+      if (u.unresolved && u.context === "write") continue; // 未声明写入单独处理
+      const c0 = u.column - 1;
+      byLine[u.line - 1].push({ start: c0, end: c0 + u.length, kind: u.unresolved ? "unresolved" : "use",
+        id: u.id, unresolved: u.unresolved, glyph: "U" });
+    }
+    // 未声明写入也画出来（x = … 中的 x）
+    for (const u of uses) {
+      if (u.unresolved && u.context === "write") {
+        const c0 = u.column - 1;
+        byLine[u.line - 1].push({ start: c0, end: c0 + u.length, kind: "unresolved",
+          id: u.id, unresolved: true, glyph: "?" });
+      }
+    }
+    return { lines, byLine };
+  }
+
+  function renderSource() {
+    const source = editor.getValue();
+    const { lines, byLine } = buildMarkers(source, DATA.defs, DATA.uses);
+    const srcEl = document.getElementById("df-src");
+    let html = "";
+    lines.forEach((text, li) => {
+      const marks = byLine[li].slice().sort((a, b) => a.start - b.start || b.end - a.end);
+      let out = "";
+      let cursor = 0;
+      for (const m of marks) {
+        if (m.start < cursor) continue; // 区间重叠时跳过
+        out += esc(text.slice(cursor, m.start));
+        const word = esc(text.slice(m.start, m.end));
+        out += `<span class="df-mark df-${m.kind}" data-kind="${m.kind}" data-line="${li + 1}" data-id="${m.id}">${word}<span class="df-glyph">${m.glyph}</span></span>`;
+        cursor = m.end;
+      }
+      out += esc(text.slice(cursor));
+      html += `<span class="df-line" data-line="${li + 1}"><span class="df-lno">${li + 1}</span>${out || "​"}</span>`;
+    });
+    srcEl.innerHTML = html;
+    document.getElementById("src-inner").dataset.lines = lines.length;
+    bindMarkerClicks();
+    requestAnimationFrame(() => { highlightSelected(); drawArcs(); });
+  }
+
+  function bindMarkerClicks() {
+    document.querySelectorAll("#df-src .df-mark").forEach((el) => {
+      el.addEventListener("click", () => {
+        const id = el.dataset.id;
+        let sym = null;
+        if (el.dataset.kind === "def") {
+          const d = DATA.defs.find((x) => x.id === id);
+          sym = d ? d.symbol_id : null;
+        } else {
+          const u = DATA.uses.find((x) => x.id === id);
+          sym = u ? (u.symbol_id || "?") : null;
+        }
+        selectedSym = (selectedSym === sym) ? null : sym;
+        refreshSelection();
+      });
+    });
+  }
+
+  /* ---------------- 连线（SVG 弧线，走左侧行号泳道） ---------------- */
+  function drawArcs() {
+    const svg = document.getElementById("arcs");
+    const srcEl = document.getElementById("df-src");
+    if (!srcEl.firstChild) { svg.innerHTML = ""; return; }
+    const laneX = 46;               // 弧线汇入泳道的 x（行号栏右侧）
+    svg.innerHTML = "";
+    svg.setAttribute("width", srcEl.scrollWidth);
+    svg.setAttribute("height", srcEl.scrollHeight);
+    svg.style.width = srcEl.scrollWidth + "px";
+    svg.style.height = srcEl.scrollHeight + "px";
+
+    // 用 offsetTop/offsetLeft（相对 offsetParent，即 .df-src-inner），
+    // 这样滚动时坐标仍与文档内位置一致，无需加回 scrollTop。
+    function center(el) {
+      return {
+        x: el.offsetLeft + 4,
+        y: el.offsetTop + el.offsetHeight / 2,
+      };
+    }
+
+    const pairs = [];
+    for (const u of DATA.uses) {
+      for (const did of (u.reaching || [])) {
+        const d = DATA.defs.find((x) => x.id === did);
+        if (!d || d.line < 1) continue;   // 内置函数定义 L0 不画连线
+        pairs.push({ u, d, back: d.line > u.line });
+      }
+    }
+    // 同泳道错开，避免多条边完全重叠
+    const laneCount = {};
+    for (const p of pairs) {
+      const useEl = document.querySelector(`#df-src .df-mark[data-id="${p.u.id}"]`);
+      const defEl = document.querySelector(`#df-src .df-mark[data-id="${p.d.id}"]`);
+      if (!useEl || !defEl) continue;
+      const a = center(useEl), b = center(defEl);
+      const key = `${Math.min(a.y, b.y)}:${Math.max(a.y, b.y)}`;
+      laneCount[key] = (laneCount[key] || 0) + 1;
+      const lane = laneX + (laneCount[key] % 4) * 3;
+      // 从使用点向左入泳道 -> 沿泳道纵走 -> 向右到定义点
+      const dStr = `M ${a.x} ${a.y} C ${lane} ${a.y}, ${lane} ${b.y}, ${b.x} ${b.y}`;
+      const ns = "http://www.w3.org/2000/svg";
+      const path = document.createElementNS(ns, "path");
+      path.setAttribute("d", dStr);
+      path.setAttribute("class", p.back ? "back" : "fwd");
+      path.dataset.sym = p.d.symbol_id || "?";
+      const title = document.createElementNS(ns, "title");
+      title.textContent = `${p.d.name}：定义 L${p.d.line}:C${p.d.column} → 使用 L${p.u.line}:C${p.u.column}` +
+        (p.back ? "（跨语句/循环回边）" : "");
+      path.appendChild(title);
+      svg.appendChild(path);
+    }
+  }
+
+  /* ---------------- 选择 / 高亮 ---------------- */
+  function highlightSelected() {
+    const marks = document.querySelectorAll("#df-src .df-mark");
+    marks.forEach((el) => {
+      const id = el.dataset.id;
+      let sym = null;
+      if (el.classList.contains("df-def")) {
+        sym = (DATA.defs.find((x) => x.id === id) || {}).symbol_id;
+      } else {
+        const u = DATA.uses.find((x) => x.id === id);
+        sym = u ? (u.symbol_id || "?") : null;
+      }
+      el.classList.toggle("dim", selectedSym !== null && sym !== selectedSym);
+      el.classList.toggle("sel", selectedSym !== null && sym === selectedSym);
+    });
+    document.querySelectorAll("#arcs path").forEach((p) => {
+      p.classList.toggle("dim", selectedSym !== null && p.dataset.sym !== selectedSym);
+    });
+  }
+
+  function refreshSelection() {
+    highlightSelected();
+    renderChains();
+    const chips = document.getElementById("var-chips");
+    chips.querySelectorAll(".chip").forEach((c) =>
+      c.classList.toggle("active", c.dataset.sid === selectedSym));
+  }
+
+  /* ---------------- 右侧列表 ---------------- */
+  function renderChains() {
+    const list = document.getElementById("chain-list");
+    const filter = (document.getElementById("filter-name").value || "").trim().toLowerCase();
+    const dmap = Object.fromEntries(DATA.defs.map((d) => [d.id, d]));
+
+    const matchName = (n) => !filter || n.toLowerCase().includes(filter);
+    const matchSym = (sid, name) =>
+      (selectedSym === null || sid === selectedSym) && matchName(name);
+
+    let html = "";
+    if (viewMode === "chain") {
+      // 使用 -> 定义
+      const uses = DATA.uses.filter((u) => matchSym(u.symbol_id || "?", u.name));
+      if (!uses.length) html = ML.empty("无匹配的使用点");
+      uses.sort((a, b) => a.line - b.line || a.column - b.column);
+      for (const u of uses) {
+        const [ul, uc] = USE_LABEL[u.context] || [u.context, "gray"];
+        const reaches = (u.reaching || []).map((id) => dmap[id]).filter(Boolean);
+        const multi = reaches.length > 1;
+        html += `<div class="df-chain">
+          <div class="chain-head">
+            <span class="nm">${esc(u.name)}</span>
+            ${ML.badge(ul, uc)}
+            ${u.unresolved ? ML.badge("未解析", "red") : ""}
+            ${multi ? ML.badge("分支/循环汇合 ×" + reaches.length, "amber") : ""}
+            <span class="df-loc" data-line="${u.line}">用@L${u.line}:C${u.column}</span>
+            <span class="chain-arrow">←</span>
+          </div>
+          <div class="reaching">
+            ${reaches.length ? reaches.map((d) => reachingRow(d)).join("")
+              : `<div class="r">${u.unresolved
+                  ? '<span class="badge red">未声明名字：没有任何定义可达</span>'
+                  : '<span class="badge gray">无到达定义</span>'}</div>`}
+          </div>
+        </div>`;
+      }
+    } else {
+      // 定义 -> 使用：默认隐藏内置（L0）与未初始化以外的合成定义，选择变量时全部展示
+      let defs0 = DATA.defs.filter((d) => matchSym(d.symbol_id || "?", d.name));
+      if (selectedSym === null) defs0 = defs0.filter((d) => d.line >= 1);
+      const defs = defs0;
+      defs.sort((a, b) => (a.line - b.line) || a.column - b.column);
+      // 反向索引：def id -> uses
+      const users = {};
+      for (const u of DATA.uses) {
+        for (const did of (u.reaching || [])) {
+          (users[did] = users[did] || []).push(u);
+        }
+      }
+      if (!defs.length) html = ML.empty("无匹配的定义点");
+      for (const d of defs) {
+        const [dl, dc] = DEF_LABEL[d.kind] || [d.kind, "gray"];
+        const us = (users[d.id] || []).slice().sort((a, b) => a.line - b.line || a.column - b.column);
+        const loc = d.line === 0 ? '<span class="df-loc">内置</span>'
+          : `<span class="df-loc" data-line="${d.line}">定@L${d.line}:C${d.column}</span>`;
+        html += `<div class="df-chain">
+          <div class="chain-head">
+            <span class="nm">${esc(d.name)}</span>
+            ${ML.badge(dl, dc)}
+            ${d.op && d.op !== "=" ? ML.badge(d.op, "blue") : ""}
+            ${loc}
+            <span class="chain-arrow">→</span>
+            ${ML.badge(us.length + " 个使用", us.length ? "cyan" : "gray")}
+          </div>
+          ${us.length ? `<div class="reaching">${us.map((u) =>
+            `<div class="r"><span class="df-loc" data-line="${u.line}">L${u.line}:C${u.column}</span>${ML.badge((USE_LABEL[u.context] || [u.context])[0],
+              (USE_LABEL[u.context] || ["", "gray"])[1])}</div>`).join("")}</div>` : ""}
+        </div>`;
+      }
+    }
+    list.innerHTML = html;
+    list.querySelectorAll(".df-loc[data-line]").forEach((el) => {
+      el.addEventListener("click", () => scrollToLine(+el.dataset.line));
+    });
+  }
+
+  function reachingRow(d) {
+    const [dl, dc] = DEF_LABEL[d.kind] || [d.kind, "gray"];
+    const loc = d.line === 0 ? '<span class="df-loc">内置函数</span>'
+      : `<span class="df-loc" data-line="${d.line}">L${d.line}:C${d.column}</span>`;
+    return `<div class="r">${loc}${ML.badge(dl, dc)}${d.op && d.op !== "=" ? ML.badge(d.op, "blue") : ""}
+      <span class="muted" style="font-size:11px">${esc(d.region)}</span></div>`;
+  }
+
+  function scrollToLine(line) {
+    const wrap = document.getElementById("src-wrap");
+    const target = wrap.querySelector(`.df-line[data-line="${line}"]`);
+    if (target) wrap.scrollTo({ top: target.offsetTop - 8, behavior: "smooth" });
+  }
+
+  /* ---------------- 变量 chips / 统计 ---------------- */
+  function renderVarChips() {
+    const chips = document.getElementById("var-chips");
+    const counts = {};
+    for (const s of DATA.symbols) {
+      if (s.kind === "builtin") continue;
+      counts[s.id] = counts[s.id] || { name: s.name, sid: s.id, n: 0 };
+    }
+    for (const u of DATA.uses) {
+      const key = u.symbol_id || "?";
+      if (!counts[key]) counts[key] = { name: u.unresolved ? u.name + " ⚠" : u.name, sid: key, n: 0 };
+      counts[key].n++;
+    }
+    const arr = Object.values(counts).filter((c) => c.n > 0 || DATA.defs.some((d) => d.symbol_id === c.sid))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    chips.innerHTML = `<span class="chip ${selectedSym === null ? "active" : ""}" data-sid="">全部</span>` +
+      arr.map((c) => `<span class="chip ${selectedSym === c.sid ? "active" : ""}" data-sid="${esc(c.sid)}">${esc(c.name)} · ${c.n}</span>`).join("");
+    chips.querySelectorAll(".chip").forEach((el) => {
+      el.addEventListener("click", () => {
+        selectedSym = el.dataset.sid || null;
+        refreshSelection();
+      });
+    });
+  }
+
+  function renderStats() {
+    const s = DATA.stats;
+    const tile = (v, k, cls) => `<div class="stat-tile"><div class="v ${cls || ""}">${v}</div><div class="k">${k}</div></div>`;
+    document.getElementById("stats").innerHTML =
+      tile(s.def_count, "定义点") +
+      tile(s.use_count, "使用点") +
+      tile(s.merged_use_count, "多定义汇合", "val-num") +
+      tile((DATA.regions || []).length, "分析区域", "") +
+      tile(s.unresolved_count, "未解析名字", s.unresolved_count ? "" : "") +
+      tile(s.uninit_use_count, "可能读到未初始化", s.uninit_use_count ? "" : "");
+    const note = [];
+    if (s.unresolved_count) note.push("存在未解析名字，未臆造其定义来源（见红色标记）。");
+    if (s.uninit_use_count) note.push("有使用点可能读到 var 声明但未初始化的值。");
+    if (s.merged_use_count) note.push("汇合点的多个到达定义是 may 分析的正常结果：运行时取哪条由实际路径决定。");
+    note.push("分析复用了语义分析的符号绑定；同名遮蔽变量是不同符号，连线不会跨作用域串线。");
+    document.getElementById("df-note").innerHTML = note.map((t) => "• " + esc(t)).join("<br>");
+  }
+
+  /* ---------------- 主流程 ---------------- */
+  async function build() {
+    const code = editor.getValue();
+    ML.store.set("draft_source", code);
+    const data = await ML.api.dataflow(code);
+    const r = data.result || {};
+    const card = document.getElementById("result-card");
+    if (!r.available) {
+      card.style.display = "block";
+      document.getElementById("stats").innerHTML = "";
+      document.getElementById("var-chips").innerHTML = "";
+      document.getElementById("chain-list").innerHTML =
+        `<div class="empty"><div class="big">🚫</div>无法进行数据流分析（词法/语法阶段未通过）。<br><a href="diagnostics.html">前往诊断页查看错误</a></div>`;
+      document.getElementById("df-src").innerHTML = "";
+      document.getElementById("arcs").innerHTML = "";
+      document.getElementById("df-note").textContent = "";
+      return;
+    }
+    DATA = r;
+    selectedSym = null;
+    card.style.display = "block";
+    renderStats();
+    renderSource();
+    renderVarChips();
+    renderChains();
+  }
+
+  document.getElementById("btn-build").onclick = build;
+  document.getElementById("filter-name").addEventListener("input", () => renderChains());
+  document.getElementById("view-tabs").querySelectorAll("button").forEach((b) => {
+    b.addEventListener("click", () => {
+      viewMode = b.dataset.v;
+      document.querySelectorAll("#view-tabs button").forEach((x) =>
+        x.classList.toggle("active", x === b));
+      renderChains();
+    });
+  });
+  window.addEventListener("resize", () => { if (DATA) drawArcs(); });
+})();
+</script>
+</body>
+</html>

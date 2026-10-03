@@ -28,6 +28,7 @@ class CompileResult:
         self.tokens = []
         self.ast = None
         self.symbol_table = None
+        self.analyzer = None
         self.bytecode = None
         self.diagnostics = diag.DiagnosticBag()
         self.stage = "idle"     # idle -> lexed -> parsed -> analyzed -> compiled
@@ -86,6 +87,7 @@ def compile_source(source: str, stop_on_error=True) -> CompileResult:
     analyzer.set_source(source)
     analyzer.analyze(ast)
     result.symbol_table = analyzer.symbols
+    result.analyzer = analyzer
     result.diagnostics.items.extend(analyzer.diagnostics.items)
     result.stage = "analyzed"
     _enrich_diagnostics(result.diagnostics, lines)
