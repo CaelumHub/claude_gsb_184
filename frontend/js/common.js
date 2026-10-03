@@ -16,6 +16,7 @@
     { key: "editor",      href: "editor.html",      icon: "✏️", title: "代码编辑器",      group: "开发" },
     { key: "ast",         href: "ast.html",         icon: "🌳", title: "AST 语法树可视化", group: "编译前端" },
     { key: "symbols",     href: "symbols.html",     icon: "🏷️", title: "符号表与作用域",  group: "编译前端" },
+    { key: "dataflow",    href: "dataflow.html",    icon: "🔀", title: "数据流分析（定义→使用）", group: "编译前端" },
     { key: "bytecode",    href: "bytecode.html",    icon: "🧩", title: "字节码 / 中间代码", group: "编译前端" },
     { key: "debug",       href: "debug.html",       icon: "🐞", title: "执行跟踪与单步调试", group: "运行调试" },
     { key: "callstack",   href: "callstack.html",   icon: "📚", title: "调用栈与变量监视", group: "运行调试" },
@@ -83,6 +84,38 @@
         "print(area);",
       ].join("\n"),
     },
+    {
+      name: "数据流：再赋值/分支/循环/遮蔽",
+      code: [
+        "// 多次赋值：后定义沿顺序流覆盖前定义",
+        "var x = 1;",
+        "x = 2;",
+        "print(x);",
+        "",
+        "// 分支汇合：if/else 中的两个定义同时到达汇合点",
+        "var mode = 0;",
+        "if (mode == 0) {",
+        "    x = 10;",
+        "} else {",
+        "    x = 20;",
+        "}",
+        "print(x);",
+        "",
+        "// 循环再赋值：循环体内的定义沿回边到达下一轮的使用",
+        "var sum = 0;",
+        "for (var i = 1; i <= 5; i = i + 1) {",
+        "    sum += i;",
+        "}",
+        "print(sum);",
+        "",
+        "// 作用域遮蔽：函数内的 x 是另一个变量，与全局 x 互不影响",
+        "func calc(x) {",
+        "    var y = x * 2;",
+        "    return y;",
+        "}",
+        "print(calc(x));",
+      ].join("\n"),
+    },
   ];
 
   ML.DEFAULT_CODE = ML.SAMPLES[0].code;
@@ -142,6 +175,9 @@
     // ---- 编译 / 运行 ----
     compile(source, detail) { return this.post("/api/compile", { source, detail: detail || "all" }); },
     run(source, options) { return this.post("/api/run", { source, options: options || {} }); },
+
+    // ---- 数据流分析 ----
+    dataflow(source) { return this.post("/api/dataflow", { source }); },
 
     // ---- 调试 ----
     debugStart(source, breakpoints, pid, vid) { return this.post("/api/debug/start", { source, breakpoints: breakpoints || [], project_id: pid, version_id: vid }); },

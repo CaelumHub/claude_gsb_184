@@ -84,6 +84,10 @@ class SemanticAnalyzer:
         for decl in program.declarations:
             if isinstance(decl, ast.FunctionDecl):
                 self._declare_function(decl)
+        # 第一遍（补充）：预声明顶层 var 变量。全局变量的作用域贯穿整个
+        # 程序，函数体内引用"声明位置靠后"的顶层变量时也应解析到同一符号
+        # （是否已赋值由数据流分析的到达-定义判定，不在此处报错）。
+        self._predeclare_globals(program)
         # 第二遍：分析每个声明
         for decl in program.declarations:
             if isinstance(decl, ast.FunctionDecl):
@@ -93,6 +97,20 @@ class SemanticAnalyzer:
         # 收尾：未使用变量告警
         self._warn_unused()
         return program
+
+    def _predeclare_globals(self, program):
+        for decl in program.declarations:
+            if not isinstance(decl, ast.VarDecl):
+                continue
+            existing = self.symbols.global_scope.lookup_local(decl.name)
+            if existing is not None and existing.kind != sym.KIND_BUILTIN:
+                continue
+            s = sym.Symbol(decl.name, sym.KIND_VARIABLE, self.symbols.global_scope,
+                           line=decl.line,
+                           column=getattr(decl, "name_column", decl.column),
+                           symbol_type=sym.TYPE_UNKNOWN, is_const=decl.is_const)
+            self.symbols.global_scope.define(s)
+            decl.prefixed_symbol = s
 
     def _declare_function(self, fn: ast.FunctionDecl):
         if self.symbols.global_scope.lookup_local(fn.name):
@@ -115,15 +133,19 @@ class SemanticAnalyzer:
     def _function_body(self, fn: ast.FunctionDecl):
         # 形参
         seen = set()
+        fn.param_symbols = []
         for i, p in enumerate(fn.params):
             if p in seen:
                 self.diagnostics.add(semantic_redeclared(p, fn.line, fn.line, fn.column, self._line(fn)))
+                fn.param_symbols.append(None)
                 continue
             seen.add(p)
+            col = (fn.param_columns or {}).get(i, fn.column)
             s = sym.Symbol(p, sym.KIND_PARAMETER, self.current_scope,
-                           line=fn.line, column=fn.column, symbol_type=sym.TYPE_UNKNOWN)
+                           line=fn.line, column=col, symbol_type=sym.TYPE_UNKNOWN)
             s.param_index = i
             self.current_scope.define(s)
+            fn.param_symbols.append(s)
         self._analyze_block(fn.body)
 
     # ------------------------------------------------------------------
@@ -152,12 +174,12 @@ class SemanticAnalyzer:
                 self._expr(a)
         elif isinstance(stmt, ast.IfStmt):
             for cond, body in stmt.branches:
-                self._expr(cond)
+                self._analyze_expr_or_stmt(cond)
                 self._analyze_block(body)
             if stmt.else_block:
                 self._analyze_block(stmt.else_block)
         elif isinstance(stmt, ast.WhileStmt):
-            self._expr(stmt.condition)
+            self._analyze_expr_or_stmt(stmt.condition)
             self.loop_depth += 1
             self._analyze_block(stmt.body)
             self.loop_depth -= 1
@@ -165,7 +187,7 @@ class SemanticAnalyzer:
             if stmt.init:
                 self._analyze_stmt(stmt.init)
             if stmt.condition:
-                self._expr(stmt.condition)
+                self._analyze_expr_or_stmt(stmt.condition)
             if stmt.increment:
                 self._expr(stmt.increment)
             self.loop_depth += 1
@@ -184,7 +206,26 @@ class SemanticAnalyzer:
         elif isinstance(stmt, ast.FunctionDecl):
             self._analyze_function(stmt)
 
+    def _analyze_expr_or_stmt(self, node):
+        """条件位置既可能是普通表达式，也可能因写法成为赋值语句。"""
+        if isinstance(node, ast.AssignStmt):
+            self._assign(node)
+        else:
+            self._expr(node)
+
     def _var_decl(self, decl: ast.VarDecl):
+        pre = getattr(decl, "prefixed_symbol", None)
+        if pre is not None and pre.scope is self.current_scope \
+                and self.current_scope.lookup_local(decl.name) is pre:
+            # 顶层 var：复用预声明时注册的全局符号，避免重复声明误报
+            if decl.initializer:
+                decl.expr_type = self._expr(decl.initializer)
+            else:
+                decl.expr_type = sym.TYPE_NULL
+            pre.symbol_type = decl.expr_type
+            self.current_scope.define(pre)
+            decl.symbol = pre
+            return
         if self.current_scope.lookup_local(decl.name):
             prev = self.current_scope.lookup_local(decl.name)
             self.diagnostics.add(semantic_redeclared(
@@ -234,6 +275,10 @@ class SemanticAnalyzer:
     def _expr(self, e) -> str:
         if e is None:
             return sym.TYPE_UNKNOWN
+        # 赋值语句出现在表达式位置（for 增量、嵌套赋值）：解析目标符号
+        if isinstance(e, ast.AssignStmt):
+            self._assign(e)
+            return e.target.expr_type or sym.TYPE_UNKNOWN
         if isinstance(e, ast.NumberLiteral):
             e.expr_type = e.kind
             return e.expr_type

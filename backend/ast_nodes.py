@@ -225,12 +225,14 @@ class Block(Stmt):
 class VarDecl(Stmt):
     type_name = "VarDecl"
 
-    def __init__(self, name, initializer, line=1, column=1, is_const=False):
+    def __init__(self, name, initializer, line=1, column=1, is_const=False,
+                 name_column=None):
         super().__init__(line, column)
         self.name = name
         self.initializer = initializer  # Expr or None
         self.is_const = is_const
         self.symbol = None
+        self.name_column = name_column if name_column is not None else column
 
     def to_dict(self):
         d = super().to_dict()
@@ -367,12 +369,14 @@ class ContinueStmt(Stmt):
 class FunctionDecl(Node):
     type_name = "FunctionDecl"
 
-    def __init__(self, name, params, body, line=1, column=1):
+    def __init__(self, name, params, body, line=1, column=1, param_columns=None):
         super().__init__(line, column)
         self.name = name
         self.params = params        # List[str]
         self.body = body            # Block
         self.symbol = None
+        self.name_column = column
+        self.param_columns = param_columns or {}   # 参数序号 -> 1-based 列号
 
     def to_dict(self):
         d = super().to_dict()

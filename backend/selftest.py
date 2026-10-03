@@ -45,6 +45,7 @@ def run_all():
     _test_lexer()
     _test_parser()
     _test_semantic()
+    _test_dataflow()
     _test_vm_basic()
     _test_functions_recursion()
     _test_control_flow()
@@ -98,6 +99,60 @@ def _test_semantic():
     ok2 = any("2 个参数" in e.message or "需要 2" in e.message for e in errs2)
     _check("语义分析：参数个数不匹配报错", ok2,
            str([e.message for e in errs2]) if not ok2 else "")
+
+
+def _test_dataflow():
+    from . import dataflow as df_mod
+
+    def reaching(view, region_idx, name, line):
+        r = view["regions"][region_idx]
+        dmap = {d["id"]: d for d in r["defs"]}
+        out = []
+        for u in r["uses"]:
+            if u["name"] == name and u["line"] == line:
+                out.append((u["status"], [dmap[x]["kind"] for x in u["reaching"]
+                                          if x in dmap]))
+        return out
+
+    # 1) 多次赋值：顺序流后定义覆盖前定义
+    v, _ = df_mod.analyze_source("var x = 1;\nx = 2;\nprint(x);")
+    got = reaching(v, 0, "x", 3)
+    _check("数据流：多次赋值指向最后定义", got == [("ok", ["assign"])], str(got))
+
+    # 2) 分支汇合：两个分支定义同时到达
+    v, _ = df_mod.analyze_source(
+        "var x = 1;\nif (true) { x = 2; } else { x = 3; }\nprint(x);")
+    got = reaching(v, 0, "x", 3)
+    kinds = got[0][1] if got else []
+    _check("数据流：分支汇合得到多个定义", got and got[0][0] == "merged"
+           and kinds.count("assign") == 2, str(got))
+
+    # 3) 循环再赋值：体内定义经回边到达自己后续的使用
+    v, _ = df_mod.analyze_source(
+        "var x = 1;\nwhile (x < 10) { x = x + 1; }")
+    r = v["regions"][0]
+    backs = [f for f in r["flows"] if f["back_edge"]]
+    _check("数据流：循环再赋值产生回边", len(backs) >= 1, str(len(backs)))
+
+    # 4) 作用域遮蔽：函数内 x 指向形参，而非全局定义
+    v, _ = df_mod.analyze_source(
+        "var x = 1;\nfunc f(x) { return x; }\nprint(f(x));")
+    func_region = v["regions"][1]
+    u = next(u for u in func_region["uses"] if u["name"] == "x")
+    dmap = {d["id"]: d for d in func_region["defs"]}
+    kinds = [dmap[x]["kind"] for x in u["reaching"]]
+    _check("数据流：作用域遮蔽不串定义", u["status"] == "ok" and kinds == ["parameter"],
+           f"{u['status']} {kinds}")
+
+    # 5) 使用在赋值之前：uninit
+    v, _ = df_mod.analyze_source("print(a);\nvar a = 1;")
+    u = next(u for u in v["regions"][0]["uses"] if u["name"] == "a")
+    _check("数据流：先用后定义标记未初始化", u["status"] == "uninit", u["status"])
+
+    # 6) 函数可引用声明位置靠后的全局变量
+    v, _ = df_mod.analyze_source("func f() { return g; }\nvar g = 1;")
+    u = next(u for u in v["regions"][1]["uses"] if u["name"] == "g")
+    _check("数据流：函数内引用顶层变量", u["status"] in ("ok", "merged"), u["status"])
 
 
 def _test_vm_basic():

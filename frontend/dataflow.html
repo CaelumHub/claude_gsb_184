@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据流分析 · MiniLang 平台</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <header class="topbar" id="topbar"></header>
+    <div class="content">
+      <div class="flex wrap between mb">
+        <div class="flex wrap" style="gap:8px">
+          <select id="sample"></select>
+          <button class="btn sm" id="btn-loadproj">📂 载入项目源码</button>
+        </div>
+        <button class="btn primary" id="btn-build">🔀 分析数据流</button>
+      </div>
+
+      <div id="editor"></div>
+
+      <div class="card mt">
+        <div class="flex wrap between">
+          <h2>定义 → 使用（到达-定义分析）</h2>
+          <div class="flex wrap" style="gap:8px">
+            <div id="df-stats" class="muted" style="font-size:12px"></div>
+            <div class="df-view-toggle" id="view-toggle">
+              <button data-v="graph" class="active">🕸️ 连线视图</button>
+              <button data-v="list">📋 列表视图</button>
+            </div>
+          </div>
+        </div>
+        <div class="desc">
+          基于语义分析的符号解析做到达-定义（reaching definitions）分析：每条边表示"某定义点写入的值可以流到某使用点"。
+          分支中的不同定义在汇合点同时到达（使用点对应多个定义）；循环体中的再赋值经<span class="df-back-hint">虚线回边</span>到达下一轮；遮蔽变量是不同符号，互不连边。
+        </div>
+
+        <div class="flex wrap" style="gap:6px" id="filters">
+          <span class="muted" style="font-size:12px;margin-right:4px">区域</span>
+          <select id="region-sel" class="df-filter-sel"></select>
+          <span class="muted" style="font-size:12px;margin:0 4px 0 8px">流类型</span>
+          <label class="df-chip"><input type="checkbox" data-k="variable" checked><span class="dot var"></span>变量</label>
+          <label class="df-chip"><input type="checkbox" data-k="parameter" checked><span class="dot param"></span>形参</label>
+          <label class="df-chip"><input type="checkbox" data-k="function"><span class="dot fn"></span>函数</label>
+          <label class="df-chip"><input type="checkbox" data-k="builtin"><span class="dot bi"></span>内置</label>
+          <label class="df-chip"><input type="checkbox" data-k="problem" checked><span class="dot prob"></span>未初始化/未定义</label>
+        </div>
+
+        <div id="diag-strip" class="mt" style="display:none"></div>
+
+        <div id="df-empty"></div>
+
+        <div id="df-graph-card" class="df-graph-card" style="display:none">
+          <div class="df-graph-scroll" id="df-scroll">
+            <div class="df-graph-inner" id="df-inner">
+              <svg class="df-svg" id="df-svg" aria-hidden="true">
+                <defs>
+                  <marker id="df-arrow-var" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="var(--df-var)"></path>
+                  </marker>
+                  <marker id="df-arrow-param" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="var(--df-param)"></path>
+                  </marker>
+                  <marker id="df-arrow-fn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="var(--df-fn)"></path>
+                  </marker>
+                  <marker id="df-arrow-bi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="var(--df-bi)"></path>
+                  </marker>
+                </defs>
+                <g id="df-edges"></g>
+              </svg>
+              <div class="df-code" id="df-code"></div>
+            </div>
+          </div>
+          <div class="df-legend flex wrap">
+            <span><i class="sw def"></i>定义点 D</span>
+            <span><i class="sw use"></i>使用点 U</span>
+            <span><i class="sw merged"></i>汇合（多个定义到达）</span>
+            <span><i class="sw uninit"></i>可能未初始化</span>
+            <span><i class="sw undef"></i>未定义名字</span>
+            <span class="df-back-hint">⤴ 虚线箭头 = 循环回边（定义在使用之后，沿回边到达）</span>
+            <span class="muted" style="margin-left:auto">点击 D/U 或列表行可高亮相关连线</span>
+          </div>
+        </div>
+
+        <div id="df-list-card" style="display:none"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="js/common.js"></script>
+<script src="js/editor.js"></script>
+<script>
+/* ============================================================
+   数据流分析页：定义点/使用点标注 + SVG 连线 + 列表视图
+   ============================================================ */
+(function () {
+  ML.Shell.render("dataflow");
+  ML.Shell.setTitle("数据流分析");
+
+  const editor = new ML.CodeEditor(document.getElementById("editor"), {
+    value: ML.store.get("draft_source", ML.SAMPLES[ML.SAMPLES.length - 1].code), height: 220,
+    onValueChange: (v) => ML.store.set("draft_source", v),
+  });
+  const sampleSel = document.getElementById("sample");
+  sampleSel.innerHTML = '<option value="">— 载入示例 —</option>' +
+    ML.SAMPLES.map((s, i) => `<option value="${i}">${ML.escapeHtml(s.name)}</option>`).join("");
+  sampleSel.onchange = () => { if (sampleSel.value !== "") { editor.setValue(ML.SAMPLES[+sampleSel.value].code); sampleSel.value = ""; } };
+  document.getElementById("btn-loadproj").onclick = async () =>
+    editor.setValue(await ML.Shell.loadSource(ML.SAMPLES[ML.SAMPLES.length - 1].code));
+
+  const esc = ML.escapeHtml;
+  const LINE_H = 20, PAD_TOP = 12, PAD_LEFT = 14, GUTTER_W = 44;
+  const CODE_X = GUTTER_W + PAD_LEFT;  // 行号槽 44px + 文本左 padding
+  const MARKER_Y = 10;                 // 标记中心线在行内的 y 偏移
+  const RIGHT_LANE_W = 130;   // 右侧连边通道
+
+  let VIEW = null;            // 后端返回的完整视图
+  let REGION_KEY = null;
+  let viewMode = "graph";
+  let selectedId = null;      // 当前选中的 def/use id
+  let charW = null;
+
+  const KIND_LABEL = {
+    decl: "var 声明", assign: "再赋值", compound: "复合赋值",
+    parameter: "形参", function: "函数定义", builtin: "内置函数",
+    undefined: "未定义名字",
+  };
+  const STATUS_LABEL = {
+    ok: "唯一定义到达", merged: "分支汇合：多个定义到达",
+    uninit: "没有定义到达（可能使用在赋值之前）",
+    undefined: "名字未定义（语义分析未解析到符号）",
+  };
+  const CONTEXT_LABEL = { read: "读取", call: "调用", compound: "复合赋值读取" };
+
+  /* ----------------------------------------------------------
+   * 过滤
+   * ---------------------------------------------------------- */
+  function activeKinds() {
+    const s = new Set();
+    document.querySelectorAll("#filters input[type=checkbox]").forEach((cb) => {
+      if (cb.checked) s.add(cb.dataset.k);
+    });
+    return s;
+  }
+
+  function currentRegion() {
+    return (VIEW.regions || []).find((r) => r.key === REGION_KEY) || (VIEW.regions || [])[0] || null;
+  }
+
+  /* 某条流是否通过过滤（uninit/undef 使用没有边，按 problem 开关单独处理） */
+  function flowVisible(flow) {
+    return activeKinds().has(flow.kind);
+  }
+
+  function useProblemVisible(u) {
+    return (u.status === "uninit" || u.status === "undefined") && activeKinds().has("problem");
+  }
+
+  /* ----------------------------------------------------------
+   * 构建标注（每个 def/use 一个 marker；复合赋值同位的 D/U 合并）
+   * ---------------------------------------------------------- */
+  function buildMarkers(region) {
+    const markers = []; // {id, aliasId?, role, kind, status, line, col, endCol, name, title}
+    const useByLoc = new Map();
+    for (const u of region.uses) {
+      useByLoc.set(`${u.line}:${u.column}`, u);
+    }
+    const usedUseIds = new Set();
+    for (const d of region.defs) {
+      if (d.synthetic) continue; // 内置伪定义不画在源码上
+      // 复合赋值 x += 1：定义与读取位于同一片文字，合并成一个 D/U 标记
+      const sameUse = (d.kind === "compound") ? useByLoc.get(`${d.line}:${d.column}`) : null;
+      const m = {
+        id: d.id, role: "def", kind: d.kind, status: "ok",
+        line: d.line, col: d.column, endCol: d.end_column,
+        name: d.name, title: `定义点 ${d.id} · ${KIND_LABEL[d.kind] || d.kind} · ${d.name}`,
+      };
+      if (sameUse) { m.aliasId = sameUse.id; usedUseIds.add(sameUse.id); }
+      markers.push(m);
+    }
+    for (const u of region.uses) {
+      if (usedUseIds.has(u.id)) continue;
+      const isBuiltin = u.context === "call" && u.resolved === "builtin" && u.status === "ok";
+      markers.push({
+        id: u.id, role: "use", kind: null,
+        status: isBuiltin ? "builtin" : u.status,
+        line: u.line, col: u.column, endCol: u.end_column,
+        name: u.name,
+        title: `使用点 ${u.id} · ${CONTEXT_LABEL[u.context] || u.context} · ${u.name} · ` +
+               (isBuiltin ? "内置函数" : STATUS_LABEL[u.status]),
+      });
+    }
+    return markers;
+  }
+
+  /* ----------------------------------------------------------
+   * 代码渲染（带 D/U 标记）
+   * ---------------------------------------------------------- */
+  function renderCode(region) {
+    const lines = VIEW.source_lines || [];
+    const markers = buildMarkers(region);
+    const byLine = {};
+    markers.forEach((m) => { (byLine[m.line] = byLine[m.line] || []).push(m); });
+
+    let html = "";
+    for (let i = 1; i <= lines.length; i++) {
+      html += `<div class="df-line" data-line="${i}">`;
+      html += `<span class="df-lineno">${i}</span>`;
+      html += `<span class="df-ltext" id="df-ltext-${i}">${ML.Highlighter.highlight(lines[i - 1] == null ? "" : lines[i - 1]) || "​"}</span>`;
+      html += `<span class="df-marklayer" id="df-marks-${i}"></span>`;
+      html += `</div>`;
+    }
+    const codeEl = document.getElementById("df-code");
+    codeEl.innerHTML = html;
+
+    // 第二遍：按字符偏移放标记（等宽字体，char 宽度测量一次）
+    if (charW == null) {
+      const cs = getComputedStyle(codeEl);
+      const ctx = document.createElement("canvas").getContext("2d");
+      ctx.font = cs.font || '13px "SFMono-Regular", monospace';
+      charW = ctx.measureText("M").width;
+    }
+    Object.keys(byLine).forEach((ln) => {
+      const layer = document.getElementById("df-marks-" + ln);
+      let mh = "";
+      for (const m of byLine[ln]) {
+        const x = CODE_X + (m.col - 1) * charW;
+        const w = Math.max(charW * (m.endCol - m.col), charW * 0.6);
+        const cls = m.role === "def"
+          ? `df-m def kind-${m.kind}${m.aliasId ? " merged-du" : ""}`
+          : `df-m use st-${m.status}`;
+        let tags = m.role === "def" ? '<i class="df-tag">D</i>' : '<i class="df-tag">U</i>';
+        if (m.aliasId) {
+          tags = `<i class="df-tag t-d" data-id="${m.id}">D</i><i class="df-tag t-u" data-id="${m.aliasId}">U</i>`;
+        }
+        mh += `<span class="${cls}" data-id="${m.id}"${m.aliasId ? ` data-alias="${m.aliasId}"` : ""} ` +
+              `style="left:${x}px;width:${w}px" title="${esc(m.title)}">${tags}</span>`;
+      }
+      layer.innerHTML = mh;
+    });
+
+    codeEl.querySelectorAll(".df-m").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const sub = e.target.closest(".df-tag[data-id]");
+        selectMarker(sub ? sub.dataset.id : el.dataset.id);
+      });
+    });
+    return markers;
+  }
+
+  /* ----------------------------------------------------------
+   * SVG 连线：所有边走右侧通道（区间着色分配通道），回边虚线
+   * ---------------------------------------------------------- */
+  function markerPos(id, markerMap) {
+    const m = markerMap.get(id);
+    if (!m) return null;
+    const y = PAD_TOP + (m.line - 1) * LINE_H + MARKER_Y;
+    const xStart = CODE_X + (m.col - 1) * charW;
+    const xEnd = CODE_X + (m.endCol - 1) * charW;
+    return { m, y, xStart, xEnd };
+  }
+
+  function drawEdges(region, markers) {
+    const svg = document.getElementById("df-svg");
+    const edgeG = document.getElementById("df-edges");
+    const codeEl = document.getElementById("df-code");
+    const lineCount = (VIEW.source_lines || []).length;
+    const inner = document.getElementById("df-inner");
+    inner.style.minWidth = "max(100%, " + (measureContentWidth() + RIGHT_LANE_W + 24) + "px)";
+
+    const w = inner.clientWidth, h = PAD_TOP * 2 + lineCount * LINE_H + 8;
+    svg.setAttribute("width", w);
+    svg.setAttribute("height", h);
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+
+    const markerMap = new Map();
+    markers.forEach((m) => {
+      markerMap.set(m.id, m);
+      if (m.aliasId) markerMap.set(m.aliasId, m); // 复合赋值的 D/U 共用同一位置
+    });
+    const useMap = new Map(region.uses.map((u) => [u.id, u]));
+
+    // 收集可见边（内置函数无源码定义点，不画箭头，仅在使用点着色）
+    const edges = [];
+    for (const f of region.flows) {
+      if (!flowVisible(f)) continue;
+      if (f.kind === "builtin") continue;
+      const dp = markerPos(f.def, markerMap);
+      const up = markerPos(f.use, markerMap);
+      if (!dp || !up) continue;
+      edges.push({ f, dp, up });
+    }
+
+    // 区间着色：按行区间分配 lane，同一 lane 上区间不重叠
+    const laneOf = assignLanes(edges);
+    edges.forEach((e, i) => { e.lane = laneOf[i]; });
+
+    // 通道起点：代码最右标记之后
+    let laneOriginX = 0;
+    for (const e of edges) laneOriginX = Math.max(laneOriginX, e.dp.xEnd, e.up.xEnd);
+    laneOriginX += 18;
+
+    let html = "";
+    for (const e of edges) {
+      const { dp, up, f, lane } = e;
+      const xLane = laneOriginX + lane * 11;
+      const sameLine = dp.line === up.line;
+      let path;
+      if (sameLine) {
+        // 同一行（如复合赋值）：在文字上方绕一个小弧
+        const yy = dp.y - 2;
+        const xOut = dp.xEnd + 2;
+        const xIn = up.xEnd + 2;
+        const xx = Math.max(xOut, xIn) + 8 + lane * 6;
+        path = `M ${xOut} ${yy} C ${xx} ${yy - 10}, ${xx} ${yy + 6}, ${xIn + 7} ${yy}`;
+      } else {
+        path = `M ${dp.xEnd + 2} ${dp.y} ` +
+               `C ${xLane} ${dp.y}, ${xLane} ${up.y}, ${up.xEnd + 8} ${up.y}`;
+      }
+      const sel = selectedId && (f.def === selectedId || f.use === selectedId);
+      const dim = selectedId && !sel;
+      html += `<path class="df-edge k-${f.kind}${f.back_edge ? " back" : ""}${sel ? " sel" : ""}${dim ? " dim" : ""}" ` +
+              `d="${path}" data-def="${f.def}" data-use="${f.use}" ` +
+              `marker-end="url(#df-arrow-${f.kind === "variable" ? "var" : f.kind})"></path>`;
+    }
+    edgeG.innerHTML = html;
+
+    // 标记选中/淡化状态
+    codeEl.querySelectorAll(".df-m").forEach((el) => {
+      const id = el.dataset.id;
+      const alias = el.dataset.alias;
+      const isSel = !!selectedId && (id === selectedId || alias === selectedId);
+      el.classList.toggle("sel", isSel);
+      if (!selectedId) { el.classList.remove("dim"); return; }
+      const related = edges.some((e2) => e2.f.def === id || e2.f.use === id ||
+                                        (alias && (e2.f.use === alias || e2.f.def === alias)));
+      el.classList.toggle("dim", !related && !isSel);
+    });
+    // 未初始化/未定义 / 内置 使用标记的显隐
+    codeEl.querySelectorAll(".df-m.use").forEach((el) => {
+      const u = useMap.get(el.dataset.id);
+      if (!u) return;
+      if (u.status === "uninit" || u.status === "undefined") {
+        el.style.display = useProblemVisible(u) ? "" : "none";
+      } else if (u.resolved === "builtin") {
+        el.style.display = activeKinds().has("builtin") ? "" : "none";
+      }
+    });
+  }
+
+  function measureContentWidth() {
+    const lines = VIEW.source_lines || [];
+    let maxLen = 0;
+    for (const l of lines) maxLen = Math.max(maxLen, (l || "").length);
+    return CODE_X + maxLen * charW + PAD_LEFT;
+  }
+
+  /* 区间着色：边按 (起点行, 终点行) 排序，每条边放到第一个行区间不重叠的 lane */
+  function assignLanes(edges) {
+    const norm = edges.map((e, i) => ({
+      i,
+      top: Math.min(e.dp.line, e.up.line),
+      bottom: Math.max(e.dp.line, e.up.line),
+    })).sort((a, b) => (a.top - b.top) || (a.bottom - b.bottom));
+    const laneEnds = []; // 每条 lane 当前占用到的行（含行内余量）
+    const result = new Array(edges.length);
+    for (const seg of norm) {
+      let lane = laneEnds.findIndex((endLine) => endLine <= seg.top);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(seg.bottom + 0.6); }
+      else { laneEnds[lane] = seg.bottom + 0.6; }
+      result[seg.i] = lane;
+    }
+    return result;
+  }
+
+  /* ----------------------------------------------------------
+   * 列表视图
+   * ---------------------------------------------------------- */
+  function renderList(region) {
+    const defMap = new Map(region.defs.map((d) => [d.id, d]));
+    const kinds = activeKinds();
+    const groups = new Map(); // use id -> {u, defs}
+    for (const u of region.uses) {
+      const fs = region.flows.filter((f) => f.use === u.id && kinds.has(f.kind));
+      const isProblem = u.status === "uninit" || u.status === "undefined";
+      if (!fs.length && !(isProblem && kinds.has("problem"))) continue;
+      groups.set(u.id, { u, fs: fs.map((f) => defMap.get(f.def)).filter(Boolean) });
+    }
+    const useArr = [...groups.values()].sort((a, b) =>
+      (a.u.line - b.u.line) || (a.u.column - b.u.column));
+
+    let html = `<div class="flex wrap between" style="margin:4px 0 10px">
+      <div class="muted" style="font-size:12.5px">按使用点列出其真正读取的定义；分支汇合时一个使用点对应多个定义。</div>
+      <div class="df-view-toggle"><button id="btn-bydef" class="">按定义点分组</button></div>
+    </div>`;
+
+    if (!useArr.length) {
+      html += ML.empty("当前过滤条件下没有数据流");
+    } else {
+      html += useArr.map(({ u, fs }) => {
+        const stCls = { ok: "green", merged: "purple", uninit: "amber", undefined: "red" }[u.status];
+        const srcLine = (VIEW.source_lines[u.line - 1] || "").trim();
+        let defsHtml;
+        if (!fs.length) {
+          defsHtml = `<span class="badge ${u.status === "undefined" ? "red" : "amber"}">${esc(STATUS_LABEL[u.status])}</span>`;
+        } else {
+          defsHtml = fs.map((d) => defChip(d)).join('<span class="df-arrow-txt">→</span>');
+        }
+        return `<div class="df-list-row" data-use="${u.id}">
+          <div class="df-list-head">
+            <span class="badge blue">使用 ${u.id}</span>
+            <span class="df-ident">${esc(u.name)}</span>
+            <span class="badge gray">L${u.line}:C${u.column}</span>
+            <span class="badge cyan">${esc(CONTEXT_LABEL[u.context] || u.context)}</span>
+            <span class="badge ${stCls}">${esc(STATUS_LABEL[u.status])}</span>
+          </div>
+          <div class="df-list-body">
+            <div class="df-list-defs">${defsHtml}</div>
+            <div class="df-list-src mono">${esc(srcLine)}</div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    const card = document.getElementById("df-list-card");
+    card.innerHTML = html;
+    const btn = document.getElementById("btn-bydef");
+    if (btn) btn.onclick = () => renderListByDef(region);
+    card.querySelectorAll(".df-list-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        setMode("graph");
+        selectMarker(row.dataset.use, true);
+      });
+    });
+    card.querySelectorAll(".df-def-ref").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setMode("graph");
+        selectMarker(el.dataset.id, true);
+      });
+    });
+  }
+
+  function defChip(d) {
+    if (!d) return "";
+    if (d.synthetic) {
+      return `<span class="df-def-ref k-builtin" data-id="${d.id}"><span class="badge green">内置</span> ${esc(d.name)}</span>`;
+    }
+    const kc = { decl: "blue", assign: "green", compound: "green", parameter: "cyan",
+                 function: "purple", undefined: "red" }[d.kind] || "gray";
+    return `<span class="df-def-ref kind-${d.kind}" data-id="${d.id}">` +
+           `<span class="badge ${kc}">${esc(KIND_LABEL[d.kind] || d.kind)}</span> ` +
+           `<span class="df-ident">${esc(d.name)}</span><span class="muted"> L${d.line}:C${d.column} (${d.id})</span></span>`;
+  }
+
+  function renderListByDef(region) {
+    const useMap = new Map(region.uses.map((u) => [u.id, u]));
+    const kinds = activeKinds();
+    const defs = region.defs.filter((d) => !d.synthetic)
+      .sort((a, b) => (a.line - b.line) || (a.column - b.column));
+    let html = `<div class="flex wrap between" style="margin:4px 0 10px">
+      <div class="muted" style="font-size:12.5px">按定义点列出其流向的使用点（含循环回边）。</div>
+      <div class="df-view-toggle"><button id="btn-byuse">按使用点分组</button></div>
+    </div>`;
+    const rows = defs.map((d) => {
+      const outs = region.flows.filter((f) => f.def === d.id && kinds.has(f.kind))
+        .map((f) => useMap.get(f.use)).filter(Boolean)
+        .sort((a, b) => (a.line - b.line) || (a.column - b.column));
+      return { d, outs };
+    }).filter((x) => x.outs.length || kinds.has("problem"));
+    if (!rows.length) { html += ML.empty("当前过滤条件下没有数据流"); }
+    else {
+      html += rows.map(({ d, outs }) => {
+        const kc = { decl: "blue", assign: "green", compound: "green", parameter: "cyan",
+                     function: "purple", undefined: "red" }[d.kind] || "gray";
+        const outHtml = outs.length
+          ? outs.map((u) => `<span class="df-use-ref" data-id="${u.id}"><span class="badge ${
+              { ok: "blue", merged: "purple", uninit: "amber", undefined: "red" }[u.status]}">U</span> ` +
+              `${esc(u.name)} <span class="muted">L${u.line}:C${u.column}${region.flows.some((f) => f.def === d.id && f.use === u.id && f.back_edge) ? " ↩回边" : ""}</span></span>`)
+            .join("")
+          : '<span class="muted">没有流向任何使用点（死定义）</span>';
+        return `<div class="df-list-row">
+          <div class="df-list-head">
+            <span class="badge ${kc}">定义 ${d.id}</span>
+            <span class="df-ident">${esc(d.name)}</span>
+            <span class="badge gray">L${d.line}:C${d.column}</span>
+            <span class="badge cyan">${esc(KIND_LABEL[d.kind] || d.kind)}</span>
+          </div>
+          <div class="df-list-body"><div class="df-use-list">${outHtml}</div></div>
+        </div>`;
+      }).join("");
+    }
+    const card = document.getElementById("df-list-card");
+    card.innerHTML = html;
+    document.getElementById("btn-byuse").onclick = () => renderList(region);
+    card.querySelectorAll(".df-use-ref").forEach((el) => {
+      el.addEventListener("click", () => { setMode("graph"); selectMarker(el.dataset.id, true); });
+    });
+  }
+
+  /* ----------------------------------------------------------
+   * 选中交互
+   * ---------------------------------------------------------- */
+  function selectMarker(id, scrollTo) {
+    selectedId = id;
+    const region = currentRegion();
+    if (!region) return;
+    const markers = buildMarkers(region);
+    drawEdges(region, markers);
+    if (id && scrollTo) {
+      const el = document.querySelector(`.df-m[data-id="${id}"]`);
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  /* ----------------------------------------------------------
+   * 诊断条
+   * ---------------------------------------------------------- */
+  function renderDiagStrip(view) {
+    const strip = document.getElementById("diag-strip");
+    const diags = view.diagnostics || [];
+    if (!diags.length) { strip.style.display = "none"; strip.innerHTML = ""; return; }
+    const errs = diags.filter((d) => d.severity === "error").length;
+    const warns = diags.filter((d) => d.severity === "warning").length;
+    strip.style.display = "";
+    strip.innerHTML = `<div class="callout warn">⚠️ 语义分析报告 ${errs} 个错误、${warns} 个警告；` +
+      `数据流结果仍基于符号解析给出（未定义名字会标红）。<a href="diagnostics.html">前往诊断页</a></div>`;
+  }
+
+  /* ----------------------------------------------------------
+   * 主渲染
+   * ---------------------------------------------------------- */
+  function renderRegionOptions(view) {
+    const sel = document.getElementById("region-sel");
+    sel.innerHTML = view.regions.map((r) =>
+      `<option value="${esc(r.key)}">${esc(r.is_main ? "<main> 顶层" : "函数 " + r.name)}</option>`).join("");
+    sel.value = REGION_KEY || view.regions[0].key;
+    REGION_KEY = sel.value;
+    sel.onchange = () => { REGION_KEY = sel.value; selectedId = null; renderAll(); };
+  }
+
+  function renderAll() {
+    const region = currentRegion();
+    const graphCard = document.getElementById("df-graph-card");
+    const listCard = document.getElementById("df-list-card");
+    document.getElementById("df-empty").innerHTML = "";
+    if (!region) { graphCard.style.display = "none"; listCard.style.display = "none"; return; }
+    if (viewMode === "graph") {
+      graphCard.style.display = "";
+      listCard.style.display = "none";
+      const markers = renderCode(region);
+      requestAnimationFrame(() => drawEdges(region, markers));
+    } else {
+      graphCard.style.display = "none";
+      listCard.style.display = "";
+      renderList(region);
+    }
+  }
+
+  function setMode(mode) {
+    viewMode = mode;
+    document.querySelectorAll("#view-toggle button").forEach((b) =>
+      b.classList.toggle("active", b.dataset.v === mode));
+    renderAll();
+  }
+
+  async function build() {
+    const code = editor.getValue();
+    ML.store.set("draft_source", code);
+    const data = await ML.api.dataflow(code);
+    const empty = document.getElementById("df-empty");
+    const graphCard = document.getElementById("df-graph-card");
+    const listCard = document.getElementById("df-list-card");
+    document.getElementById("diag-strip").style.display = "none";
+    if (!data.ok) {
+      VIEW = null;
+      graphCard.style.display = "none"; listCard.style.display = "none";
+      empty.innerHTML = `<div class="empty"><div class="big">🚫</div>词法/语法阶段未通过，无法进行数据流分析。<br>` +
+        `<a href="diagnostics.html">前往诊断页查看错误</a></div>`;
+      document.getElementById("df-stats").textContent = "";
+      document.getElementById("region-sel").innerHTML = "";
+      return;
+    }
+    VIEW = data;
+    selectedId = null;
+    charW = null;
+    REGION_KEY = (data.regions[0] || {}).key || null;
+    renderRegionOptions(data);
+    renderDiagStrip(data);
+    const s = data.stats || {};
+    document.getElementById("df-stats").textContent =
+      `${s.regions} 个区域 · ${s.defs} 个定义点 · ${s.uses} 个使用点 · ${s.flows} 条数据流`;
+    renderAll();
+  }
+
+  /* ----------------------------------------------------------
+   * 事件
+   * ---------------------------------------------------------- */
+  document.getElementById("btn-build").onclick = build;
+  document.getElementById("df-scroll").addEventListener("click", (e) => {
+    if (!e.target.closest(".df-m")) selectMarker(null);
+  });
+  document.querySelectorAll("#view-toggle button").forEach((b) => {
+    b.onclick = () => setMode(b.dataset.v);
+  });
+  document.querySelectorAll("#filters input[type=checkbox]").forEach((cb) => {
+    const sync = () => cb.closest(".df-chip").classList.toggle("on", cb.checked);
+    sync();
+    cb.onchange = () => { sync(); if (VIEW) renderAll(); };
+  });
+  let resizeT = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => { if (VIEW && viewMode === "graph") renderAll(); }, 120);
+  });
+
+  // 打开页面即用预置示例分析一次
+  build();
+})();
+</script>
+</body>
+</html>

@@ -27,6 +27,7 @@ from . import debugger as debugger_mod
 from . import profiler as profiler_mod
 from . import diagnostics as diag
 from . import memory_model
+from . import dataflow as dataflow_mod
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +248,22 @@ class Service:
         if detail == "all" and result.bytecode is not None:
             view["bytecode"] = result.bytecode.to_dict()
             view["bytecode"]["functions"].reverse()
+        return view
+
+    # ==================================================================
+    # 数据流分析
+    # ==================================================================
+    def dataflow_view(self, source):
+        """基于语义分析符号解析的到达-定义分析，供数据流页面渲染。"""
+        view, bag = dataflow_mod.analyze_source(source)
+        if view is None:
+            return {
+                "ok": False,
+                "diagnostics": bag.to_list(),
+                "source_lines": source.split("\n"),
+            }
+        view["ok"] = True
+        view["source_lines"] = source.split("\n")
         return view
 
     # ==================================================================

@@ -158,6 +158,11 @@ class Handler(BaseHTTPRequestHandler):
             out = svc.run(body.get("source", ""), opts)
             return self._json(200, {"ok": True, "result": out})
 
+        # ---- 数据流分析 ----
+        if path == "/api/dataflow" and method == "POST":
+            view = svc.dataflow_view(body.get("source", ""))
+            return self._json(200, view)
+
         # ---- 调试 ----
         if path == "/api/debug/start" and method == "POST":
             state = svc.debug_start(body.get("source", ""), body.get("breakpoints", []),
